@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/aws-sdk/2.1488.0/aws-sdk.min.js"></script>
+  <meta charset="UTF-8">
+  <title>Dictation Practice</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 650px; margin: 20px auto; }
+    h1 { text-align: center; }
+
+    .section { border: 1px solid #ccc; padding: 20px; margin-bottom: 20px; border-radius: 8px; }
+    label { display: block; margin-top: 10px; }
+    input, textarea, button { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; }
+    button { cursor: pointer; }
+
+    .question { font-size: 1.4em; margin: 15px 0; }
+
+    /* Tabs */
+    #teacherTabBtn, #studentTabBtn {
+      flex: 1;
+      padding: 12px;
+      font-size: 1.1em;
+      cursor: pointer;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background-color: #eee;
+    }
+    .active-tab {
+      background-color: #4287f5;
+      color: white;
+      border-color: #4287f5;
+    }
+    .tab-content { animation: fadeIn 0.25s; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Dictation Practice</h1>
+
+  <!-- TAB BUTTONS -->
+  <div style="display:flex; gap:10px; margin-bottom:20px;">
+    <button id="teacherTabBtn" onclick="openTab('teacherTab')" class="active-tab">Teacher</button>
+    <button id="studentTabBtn" onclick="openTab('studentTab')">Student</button>
+  </div>
+
+  <!-- TEACHER TAB -->
+  <div id="teacherTab" class="tab-content">
+    <div class="section">
+      <h2>Add Word List</h2>
+
+      <label>Teacher ID
+        <input id="teacherId" value="teacher1" />
+      </label>
+
+      <label>Word List ID
+        <input id="wordListId" value="default" />
+      </label>
+
+      <label>Words (comma separated)
+        <textarea id="wordsInput" rows="3">apple, banana, orange, elephant, mountain</textarea>
+      </label>
+
+      <button onclick="saveWords()">Save Words</button>
+      <p id="saveWordsMsg"></p>
+    </div>
+  </div>
+
+  <!-- STUDENT TAB -->
+  <div id="studentTab" class="tab-content" style="display:none;">
+    <div class="section">
+      <h2>Start Quiz</h2>
+
+      <label>Teacher ID
+        <input id="quizTeacherId" value="teacher1" />
+      </label>
+
+      <label>Word List ID
+        <input id="quizWordListId" value="default" />
+      </label>
+
+      <label>Number of words
+        <input id="quizCount" type="number" value="5" min="1" max="20" />
+      </label>
+
+      <button onclick="startQuiz()">Start Quiz</button>
+
+      <div id="quizArea" style="display:none;">
+        <p class="question" id="currentQuestion"></p>
+
+        <label>Your spelling:
+          <input id="answerInput" />
+        </label>
+        
+        <p id="heardText" style="color: gray; font-size: 0.9em;"></p>
+
+        <button onclick="submitAnswer()">Submit Answer</button>
+        <p id="quizProgress"></p>
+      </div>
+
+      <div id="quizResult"></div>
+    </div>
+  </div>
+
+  <!-- TAB SWITCHING SCRIPT -->
+  <script>
+    function openTab(tabName) {
+      document.getElementById("teacherTab").style.display = "none";
+      document.getElementById("studentTab").style.display = "none";
+
+      document.getElementById(tabName).style.display = "block";
+
+      document.getElementById("teacherTabBtn").classList.remove("active-tab");
+      document.getElementById("studentTabBtn").classList.remove("active-tab");
+
+      if (tabName === "teacherTab") {
+        document.getElementById("teacherTabBtn").classList.add("active-tab");
+      } else {
+        document.getElementById("studentTabBtn").classList.add("active-tab");
+      }
+    }
+  </script>
+
+  <!-- MAIN APP LOGIC -->
+  <script>
+    /* 🔥 IMPORTANT: Set your API base URL here */
+    const API_BASE = "https://05i20rsny3.execute-api.ap-south-1.amazonaws.com/prod";
+
+    let currentWords = [];
+    let currentAnswers = [];
+    let currentIndex = 0;
+
+    /* ──────────────────────────────────────
+       AWS Polly TTS Configuration
+    ──────────────────────────────────────── */
+
+    AWS.config.region = 'ap-south-1';
+
+    // Replace with your actual Identity Pool ID
+    AWS.config.credentials = new AWS.CognitoIdentityCredentials({
+        IdentityPoolId: 'ap-south-1:181647bc-0d4c-4d8c-96e7-2010c2b45ffd'
+    });
+
+    const polly = new AWS.Polly({
+        apiVersion: '2016-06-10',
+        region: 'ap-south-1'
+    });
+
+    /* 
+      Convert text → MP3 → Play in browser.
+      Uses Polly Indian English voice "Aditi".
+    */
+    function speak(text) {
+        const params = {
+            OutputFormat: 'mp3',
+            Text: text,
+            VoiceId: 'Aditi'      // Clear Indian-accent female voice
+        };
+
+        polly.synthesizeSpeech(params, function(err, data) {
+            if (err) {
+                console.error("Polly error:", err);
+                alert("Unable to play audio. Check console.");
+                return;
+            }
+
+            const audioBytes = new Uint8Array(data.AudioStream);
+            const blob = new Blob([audioBytes.buffer], { type: 'audio/mpeg' });
+            const url = URL.createObjectURL(blob);
+
+            const audio = new Audio(url);
+            audio.play();
+        });
+    }
+
+    async function saveWords() {
+      const teacherId = document.getElementById("teacherId").value.trim();
+      const wordListId = document.getElementById("wordListId").value.trim() || "default";
+      const raw = document.getElementById("wordsInput").value;
+
+      const words = raw.split(",").map(w => w.trim()).filter(w => w.length > 0);
+
+      if (!teacherId || words.length === 0) {
+        alert("Please provide teacher ID and at least one word.");
+        return;
+      }
+
+      try {
+        const res = await fetch(API_BASE + "/words", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            teacher_id: teacherId,
+            word_list_id: wordListId,
+            words: words
+          })
+        });
+
+        const data = await res.json();
+        document.getElementById("saveWordsMsg").innerText = data.message || "Saved.";
+      } catch (err) {
+        console.error(err);
+        document.getElementById("saveWordsMsg").innerText = "Error saving words.";
+      }
+    }
+
+    async function startQuiz() {
+      const teacherId = document.getElementById("quizTeacherId").value.trim();
+      const wordListId = document.getElementById("quizWordListId").value.trim() || "default";
+      const count = document.getElementById("quizCount").value || "5";
+
+      try {
+        const url = `${API_BASE}/quiz?teacher_id=${teacherId}&word_list_id=${wordListId}&count=${count}`;
+        const res = await fetch(url);
+        const data = await res.json();
+
+        currentWords = data.words;
+        currentAnswers = [];
+        currentIndex = 0;
+
+        document.getElementById("quizArea").style.display = "block";
+        document.getElementById("quizResult").innerHTML = "";
+
+        showCurrentQuestion();
+      } catch (err) {
+        console.error(err);
+        alert("Error starting quiz.");
+      }
+    }
+
+    function startLetterCapture() {
+      if (!('webkitSpeechRecognition' in window)) {
+        alert("Speech recognition not supported in this browser.");
+        return;
+      }
+
+      const recognition = new webkitSpeechRecognition();
+      recognition.lang = "en-IN";
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.start();
+
+      recognition.onresult = function(event) {
+        let spoken = event.results[0][0].transcript.trim().toUpperCase();
+
+        // Show what we heard
+        const heardEl = document.getElementById("heardText");
+        if (heardEl) {
+          heardEl.innerText = "Heard: " + spoken;
+        }
+        
+        function isSpelledOutLetterSequence(spoken) {
+          const parts = spoken.trim().split(/\s+/);
+
+          // Must have >1 part (A alone isn't spelling a whole word)
+          if (parts.length < 2) return false;
+
+          // Every part must be a single A-Z letter
+          return parts.every(p => /^[A-Z]$/.test(p));
+        }
+        
+        const validSpelling = isSpelledOutLetterSequence(spoken);
+
+        if (!validSpelling) {
+          heardEl.innerText += " (ignored - not spelled letter-by-letter)";
+          return;
+        }
+
+        // AUTO-FILL answer box
+        const input = document.getElementById("answerInput");
+        // Clean spaces → convert to proper word spelling
+        const cleaned = spoken.replace(/\s+/g, "");
+        input.value = cleaned;
+      };
+
+      recognition.onerror = function(e) {
+          console.error("Speech recognition error:", e);
+          document.getElementById("heardText").innerText = "Error listening…";
+      };
+    }
+
+
+    function showCurrentQuestion() {
+      const word = currentWords[currentIndex];
+      // document.getElementById("currentQuestion").innerText =
+      //   "Word " + (currentIndex + 1) + ": " + word;
+      document.getElementById("currentQuestion").innerHTML = `
+        Word ${currentIndex + 1}:
+        <button onclick="speak('${word}')" 
+                style="margin-left:10px; width:auto; padding:6px 12px;">
+          🔊 Repeat
+        </button>
+        <button onclick="startLetterCapture()"
+                style="margin-left:10px; width:auto; padding:6px 12px;">
+          🎤 Speak Letter
+        </button>
+      `;
+
+      // Clear previous answer
+      document.getElementById("answerInput").value = "";
+      // Update progress
+      document.getElementById("quizProgress").innerText =
+        `Question ${currentIndex + 1} of ${currentWords.length}`;
+      // Auto speak the new word
+      speak(word);
+    }
+
+    function submitAnswer() {
+      const answer = document.getElementById("answerInput").value.trim();
+      currentAnswers.push(answer);
+
+      currentIndex++;
+      if (currentIndex < currentWords.length) {
+        showCurrentQuestion();
+      } else {
+        finishQuiz();
+      }
+    }
+
+    async function finishQuiz() {
+      try {
+        const res = await fetch(API_BASE + "/check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            questions: currentWords,
+            answers: currentAnswers
+          })
+        });
+
+        const data = await res.json();
+        let html = `<h3>Results</h3>`;
+        html += `<p>Score: ${data.score} / ${currentWords.length}</p><ul>`;
+
+        data.results.forEach(r => {
+          html += `<li>${r.question} → ${r.answer} (${r.correct ? "Correct" : "Wrong"})</li>`;
+        });
+
+        html += `</ul>`;
+        document.getElementById("quizResult").innerHTML = html;
+
+        document.getElementById("quizArea").style.display = "none";
+      } catch (err) {
+        console.error(err);
+        document.getElementById("quizResult").innerHTML = "<p>Error.</p>";
+      }
+    }
+  </script>
+
+</body>
+</html>
